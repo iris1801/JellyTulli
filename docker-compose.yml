@@ -1,0 +1,14 @@
+version: '3'
+services:
+  backend:
+    build: ./backend
+    container_name: jellytulli-backend
+    ports:
+      - "8000:8000"
+  frontend:
+    build: ./frontend
+    container_name: jellytulli-frontend
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
