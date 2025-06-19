@@ -1,74 +1,71 @@
-# main.py
-# Importa le librerie necessarie
-from fastapi import FastAPI, APIRouter
-import requests
 import threading
 import time
-import os
+import requests
+from fastapi import FastAPI, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 
-# Configurazione: URL del server Jellyfin e chiave API (le variabili d'ambiente possono sovrascrivere i valori di default)
-JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://jellyfin:8096")  # URL base del server Jellyfin (default per Docker network)
-JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY")  # Chiave API Jellyfin (se necessaria per l'autenticazione)
+# Jellyfin URL fisso (il tuo server esterno)
+JELLYFIN_URL = "http://10.0.0.100:8096"
+API_KEY = "a0b5c4560e424a47bb97a8bf8df89d3e"
 
-# Variabile globale per memorizzare le sessioni attive correnti (con contenuti in riproduzione)
+# Lista condivisa per contenere le sessioni attive
 active_sessions = []
 
-def poll_jellyfin():
-    """
-    Funzione di polling per recuperare periodicamente le sessioni attive dal server Jellyfin.
-    Esegue richieste HTTP GET all'endpoint /Sessions del server Jellyfin ogni 15 secondi,
-    filtra le sessioni con contenuto attualmente in riproduzione e aggiorna la variabile globale active_sessions.
-    """
-    global active_sessions
-    # Prepara gli header per l'autenticazione (usa la chiave API se fornita)
-    headers = {}
-    if JELLYFIN_API_KEY:
-        headers["X-Emby-Token"] = JELLYFIN_API_KEY  # Header di autenticazione per Jellyfin
-
-    # Loop infinito per il polling periodico
-    while True:
-        try:
-            # Esegue la richiesta GET al server Jellyfin per ottenere le sessioni correnti
-            response = requests.get(f"{JELLYFIN_URL}/Sessions", headers=headers)
-            if response.status_code == 200:
-                sessions = response.json()  # Ottiene la lista delle sessioni in formato JSON
-                # Filtra solo le sessioni che hanno un contenuto in riproduzione (NowPlayingItem presente e non in pausa)
-                active = []
-                for session in sessions:
-                    # Verifica se c'è un elemento in riproduzione nella sessione
-                    now_playing = session.get("NowPlayingItem")
-                    if now_playing:
-                        # Verifica lo stato di riproduzione: aggiunge la sessione solo se non è in pausa
-                        play_state = session.get("PlayState", {})
-                        if not play_state.get("IsPaused", False):
-                            active.append(session)
-                # Aggiorna la variabile globale con la lista filtrata di sessioni attive
-                active_sessions = active
-        except Exception as e:
-            # In caso di errore nella richiesta o nel parsing, stampa l'errore e prosegue
-            print(f"Errore nel polling di Jellyfin: {e}")
-        # Attende 15 secondi prima di effettuare la prossima richiesta
-        time.sleep(15)
-
-# Crea l'app FastAPI e il router con prefisso /api
+# FastAPI app + router
 app = FastAPI()
 router = APIRouter(prefix="/api")
 
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Funzione che esegue il polling delle sessioni Jellyfin ogni 15 secondi
+def poll_jellyfin():
+    global active_sessions
+    while True:
+        try:
+            headers = {"X-Emby-Token": API_KEY}
+            response = requests.get(f"{JELLYFIN_URL}/Sessions", headers=headers, timeout=10)
+            response.raise_for_status()
+            sessions = response.json()
+
+            # Filtra e trasforma le sessioni attive
+            active_sessions = []
+            for session in sessions:
+                state = session.get("PlayState", {})
+                if state.get("IsPaused") is False and session.get("NowPlayingItem"):
+                    active_sessions.append({
+                        "user": session.get("UserName"),
+                        "content": session["NowPlayingItem"].get("Name"),
+                        "time": time.strftime('%H:%M:%S', time.gmtime(int(session.get("PlayState", {}).get("PositionTicks", 0)) // 10_000_000)),
+                        "device": session.get("DeviceName") or session.get("Client"),
+                        "ip": session.get("RemoteEndPoint", "").split(":")[0],
+                    })
+
+        except requests.exceptions.RequestException as e:
+            print(f"Errore di connessione al server Jellyfin: {e}")
+        except Exception as e:
+            print(f"Errore generico durante il polling di Jellyfin: {e}")
+        time.sleep(15)
+
+# Endpoint API per recuperare le sessioni attive
 @router.get("/sessions/active")
 def get_active_sessions():
-    """
-    Endpoint GET /api/sessions/active
-    Restituisce le sessioni attive attualmente memorizzate (solo quelle con contenuti in riproduzione).
-    Il formato della risposta è un dizionario con chiave "active_sessions" contenente la lista delle sessioni attive.
-    """
-    return {"active_sessions": active_sessions}
+    return active_sessions
 
-# Registra il router nell'app FastAPI
+# Endpoint per healthcheck
+@router.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+# Registrazione delle rotte e avvio del thread di polling
 app.include_router(router)
 
-# All'avvio dell'applicazione, avvia il thread di polling per aggiornare le sessioni attive
 @app.on_event("startup")
-def start_polling_thread():
-    # Crea e avvia un thread daemon che esegue la funzione poll_jellyfin in background
-    polling_thread = threading.Thread(target=poll_jellyfin, daemon=True)
-    polling_thread.start()
+def startup_event():
+    thread = threading.Thread(target=poll_jellyfin, daemon=True)
+    thread.start()
