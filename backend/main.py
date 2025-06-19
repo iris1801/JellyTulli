@@ -17,7 +17,7 @@ def poll_jellyfin():
             # Richiede le sessioni attive dal server Jellyfin tramite API
             response = requests.get(f"{JELLYFIN_URL}/Sessions", params={"api_key": API_KEY})
             sessions = response.json()  # Jellyfin restituisce la lista delle sessioni in JSON
-
+            print(f"Ricevute {len(sessions)} sessioni dal server Jellyfin (payload {len(response.content)} bytes)")
             sessions_list = []
             for sess in sessions:
                 user = sess.get("UserName", "")
@@ -48,6 +48,7 @@ def poll_jellyfin():
                 })
             # Aggiorna la lista globale delle sessioni attive (in memoria)
             active_sessions[:] = sessions_list
+            print(f"Sessioni attive (in riproduzione): {len(sessions_list)}")
         except Exception as e:
             print(f"Errore nel recupero delle sessioni Jellyfin: {e}")
         # Attende 15 secondi prima di effettuare una nuova richiesta
@@ -58,7 +59,7 @@ def poll_jellyfin():
 def startup_event():
     threading.Thread(target=poll_jellyfin, daemon=True).start()
 
-@app.get("/sessions/active")
+@app.get("/api/sessions/active")
 def get_active_sessions():
     """
     Endpoint per ottenere l'elenco corrente delle sessioni attive in formato JSON.
